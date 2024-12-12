@@ -73,3 +73,9 @@ target/
 
 # Test cases configuration
 tests/dcetests.cfg
+
+# VSCode
+.vscode
+
+# Kerberos Cache Files
+*.ccache

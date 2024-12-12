@@ -1,6 +1,6 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright Fortra, LLC and its affiliated companies
+# Copyright Fortra, LLC and its affiliated companies 
 #
 # All rights reserved.
 #
@@ -30,17 +30,19 @@ from binascii import unhexlify
 from impacket.dcerpc.v5.ndr import NDRCALL, NDR, NDRSTRUCT, NDRUNION, NDRPOINTER, NDRUniConformantArray, \
     NDRUniConformantVaryingArray, NDRENUM
 from impacket.dcerpc.v5.dtypes import NULL, RPC_UNICODE_STRING, ULONG, USHORT, UCHAR, LARGE_INTEGER, RPC_SID, LONG, STR, \
-    LPBYTE, SECURITY_INFORMATION, PRPC_SID, PRPC_UNICODE_STRING, LPWSTR
+    LPBYTE, SECURITY_INFORMATION, PRPC_SID, PRPC_UNICODE_STRING, LPWSTR, ULONGLONG, LONG64
 from impacket.dcerpc.v5.rpcrt import DCERPCException
 from impacket import nt_errors, LOG
 from impacket.uuid import uuidtup_to_bin
 from impacket.dcerpc.v5.enum import Enum
 from impacket.structure import Structure
-
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.Hash import HMAC, SHA512
 import struct
 import os
-from hashlib import md5
-from Cryptodome.Cipher import ARC4
+import hashlib
+from Cryptodome.Cipher import ARC4, AES
+from Crypto.Random import get_random_bytes
 
 MSRPC_UUID_SAMR   = uuidtup_to_bin(('12345778-1234-ABCD-EF00-0123456789AC', '1.0'))
 
@@ -262,6 +264,15 @@ DOMAIN_GROUP_RID_CONTROLLERS          = 0x00000204
 DOMAIN_ALIAS_RID_ADMINS               = 0x00000220
 DOMAIN_GROUP_RID_READONLY_CONTROLLERS = 0x00000209
 
+# 2.2.1.18 AEAD-AES-256-CBC-HMAC-SHA512 Constants
+SAM_AES_VERSION_BYTE                = bytes([1])
+SAM_AES_VERSION_BYTE_LENGTH         = bytes([1])
+SAM_AES_256_ALG                     = b"AEAD-AES-256-CBC-HMAC-SHA512"
+SAM_AES256_ENC_KEY_STRING           = b"Microsoft SAM encryption key AEAD-AES-256-CBC-HMAC-SHA512 16"
+SAM_AES256_ENC_KEY_STRING_LENGTH    = len(SAM_AES256_ENC_KEY_STRING) + 1 # \0 is included in length
+SAM_AES256_MAC_KEY_STRING           = b"Microsoft SAM MAC key AEAD-AES-256-CBC-HMAC-SHA512 16"
+SAM_AES256_MAC_KEY_STRING_LENGTH    = len(SAM_AES256_MAC_KEY_STRING) + 1 # \0 is included in length
+
 # 2.2.4.1 Domain Fields
 DOMAIN_PASSWORD_COMPLEX         = 0x00000001
 DOMAIN_PASSWORD_NO_ANON_CHANGE  = 0x00000002
@@ -482,6 +493,29 @@ class CHAR_ARRAY(NDRUniConformantArray):
 class PCHAR_ARRAY(NDRPOINTER):
     referent = (
         ('Data', CHAR_ARRAY),
+    )
+
+class UCHAR_64(NDRSTRUCT):
+    structure = (
+        ('Data', '64s=""'),
+    )
+    def getAlignment(self):
+        return 1
+
+class UCHAR_16(NDRSTRUCT):
+    structure = (
+        ('Data', '16s=""'),
+    )
+    def getAlignment(self):
+        return 1
+
+
+class UCHAR_ARRAY(NDRUniConformantArray):
+    item = 'c'
+
+class PUCHAR_ARRAY(NDRPOINTER):
+    referent = (
+        ('Data', UCHAR_ARRAY),
     )
 
 class SAMPR_SR_SECURITY_DESCRIPTOR(NDRSTRUCT):
@@ -788,6 +822,29 @@ class SAMPR_ALIAS_INFO_BUFFER(NDRUNION):
         ALIAS_INFORMATION_CLASS.AliasNameInformation         : ('Name', SAMPR_ALIAS_NAME_INFORMATION),
         ALIAS_INFORMATION_CLASS.AliasAdminCommentInformation : ('AdminComment', SAMPR_ALIAS_ADM_COMMENT_INFORMATION),
     }
+
+class SAMPR_ENCRYPTED_PASSWORD_AES(NDRSTRUCT):
+    structure = (
+        ('AuthData', UCHAR_64),
+        ('Salt', UCHAR_16),
+        ('cbCipher', ULONG),
+        ('Cipher', PUCHAR_ARRAY),
+        ('PBKDF2Iterations', ULONGLONG),
+    )
+    
+class SAMPR_USER_PASSWORD_AES(NDRSTRUCT):
+    structure = (
+        ('Length', ULONG),
+        ('Buffer', '512s=b""'),
+    )
+    def getAlignment(self):
+        return 4
+    
+# Define the pointer type for SAMPR_ENCRYPTED_PASSWORD_AES
+class PSAMPR_ENCRYPTED_PASSWORD_AES(NDRPOINTER):
+    referent = (
+        ('Data', SAMPR_ENCRYPTED_PASSWORD_AES),
+    )
 
 class PSAMPR_ALIAS_INFO_BUFFER(NDRPOINTER):
     referent = (
@@ -2255,6 +2312,21 @@ class SamrUnicodeChangePasswordUser2(NDRCALL):
        ('OldLmOwfPasswordEncryptedWithNewNt',PENCRYPTED_LM_OWF_PASSWORD),
     )
 
+
+# Define the SamrUnicodeChangePasswordUser4 RPC Call Structure
+class SamrUnicodeChangePasswordUser4(NDRCALL):
+    opnum = 73  # Assuming the opnum for SamrUnicodeChangePasswordUser4 is 73
+    structure = (
+        ('ServerName', RPC_UNICODE_STRING),             # NETBIOS name of the server
+        ('UserName', RPC_UNICODE_STRING),                # Username for the account
+        ('EncryptedPassword', PSAMPR_ENCRYPTED_PASSWORD_AES),  # Encrypted password structure
+    )
+
+class SamrUnicodeChangePasswordUser4Response(NDRCALL):
+    structure = (
+       ('ErrorCode',ULONG),
+    )
+
 class SamrUnicodeChangePasswordUser2Response(NDRCALL):
     structure = (
        ('ErrorCode',ULONG),
@@ -2434,6 +2506,7 @@ OPNUMS = {
 65 : (SamrRidToSid, SamrRidToSidResponse),
 66 : (SamrSetDSRMPassword, SamrSetDSRMPasswordResponse),
 67 : (SamrValidatePassword, SamrValidatePasswordResponse),
+73 : (SamrUnicodeChangePasswordUser4, SamrUnicodeChangePasswordUser4Response)
 }
 
 ################################################################################
@@ -2759,6 +2832,7 @@ def hSamrGetAliasMembership(dce, domainHandle, sidArray):
     request['SidArray']['Count'] = len(sidArray['Sids'])
     return dce.request(request)
 
+
 def hSamrChangePasswordUser(dce, userHandle, oldPassword, newPassword, oldPwdHashNT='', newPwdHashLM='', newPwdHashNT=''):
     request = SamrChangePasswordUser()
     request['UserHandle'] = userHandle
@@ -2852,6 +2926,108 @@ def hSamrUnicodeChangePasswordUser2(dce, serverName='\x00', userName='', oldPass
     request['OldLmOwfPasswordEncryptedWithNewNt'] = NULL
 
     return dce.request(request)
+
+
+def _generate_password_buffer(password: str, size: int = 512):
+    # decrypted cipher of less than (SAM_MAX_PASSWORD_LENGTH * sizeof(WCHAR)) + sizeof(USHORT))
+    # bytes will be rejected by the server and a failure status of STATUS_WRONG_PASSWORD returned to the client.
+    length = (size * 2) + 2 
+
+    # Padding is so that we align on the 16 byte boundry for AES so we can use that to encrypt the buffer
+    padding_length = (16 - length % 16)
+
+    array = bytearray(os.urandom(length + padding_length)) 
+
+    encoded_password = password.encode('utf-16le')
+    encoded_password_length = len(encoded_password)
+
+    # Set the length
+    length_bytes = struct.pack('<H', encoded_password_length)
+    array[0] = length_bytes[0]
+    array[1] = length_bytes[1]
+
+    # copy the encoded password in passed the length bytes
+    for i in range(encoded_password_length):
+        array[i+2] = encoded_password[i]
+
+    return array
+
+# Derive key using NT hash and PBKDF2
+def _generate_cek(current_password: str, salt: bytes, iterations: int) -> bytes:
+    from impacket import ntlm
+    nt_hash = ntlm.compute_nthash(current_password)
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-samr/c37085ec-c456-4a1c-ad98-a4c2b39a35fd
+    key = PBKDF2(nt_hash, salt, dkLen=16, count=iterations) 
+    return key
+
+
+def _encrypt_password_aes(current_password, new_password, iterations=5000):
+    # Generate random 16-byte salt
+    salt = get_random_bytes(16)
+    key = _generate_cek(current_password, salt, iterations)    
+
+    # Note that enc_key is truncated to 32-bytes and the entire 64-byte mac_key is used.
+    enc_key_hash = HMAC.new(key, digestmod=SHA512)
+    enc_key_hash.update(SAM_AES256_ENC_KEY_STRING)
+    enc_key_full = enc_key_hash.digest()
+    # truncate to 32 bytes
+    enc_key = enc_key_full[:32]
+
+    mac_key_hash = HMAC.new(key, digestmod=SHA512)
+    mac_key_hash.update(SAM_AES256_MAC_KEY_STRING)
+    mac_key = mac_key_hash.digest()
+
+    # Encrypt the new password padded to AES block size
+    cipher = AES.new(enc_key, AES.MODE_CBC, iv=salt)
+    #padded_password = new_password.encode('utf-16le').ljust(32, b'\x00')
+    password_buffer = _generate_password_buffer(new_password)
+    encrypted_password = cipher.encrypt(password_buffer)
+
+    auth_data_hash = HMAC.new(mac_key, digestmod=SHA512)
+    auth_data_hash.update(SAM_AES_VERSION_BYTE)
+    auth_data_hash.update(salt)
+    auth_data_hash.update(encrypted_password)
+    auth_data_hash.update(SAM_AES_VERSION_BYTE_LENGTH)
+
+    auth_data = auth_data_hash.digest()
+
+    return auth_data, salt, encrypted_password, iterations
+    
+def hSamrUnicodeChangePasswordUser4(dce, server_name, user_name, current_password, new_password):
+    server_name_bytes = server_name.encode('utf-16le')
+    user_name_bytes = user_name.encode('utf-16le')
+
+    auth_data, salt, encrypted_password, iterations = _encrypt_password_aes(current_password, new_password)
+
+    # Wrap the salt and auth data in the correct structures
+    auth_data_struct = UCHAR_64()
+    auth_data_struct['Data'] = auth_data
+
+    salt_struct = UCHAR_16()
+    salt_struct['Data'] = salt
+
+    # Create the SAMPR_ENCRYPTED_PASSWORD_AES structure
+    encrypted_password_struct = SAMPR_ENCRYPTED_PASSWORD_AES()
+    encrypted_password_struct['AuthData'] = auth_data_struct
+    encrypted_password_struct['Salt'] = salt_struct
+    encrypted_password_struct['cbCipher'] = len(encrypted_password)
+    cipher_pointer = PUCHAR_ARRAY()
+    cipher_pointer['Data'] = encrypted_password
+
+    encrypted_password_struct['Cipher'] = cipher_pointer
+    encrypted_password_struct['PBKDF2Iterations'] = iterations
+
+    # Create the pointer to SAMPR_ENCRYPTED_PASSWORD_AES
+    encrypted_password_pointer = PSAMPR_ENCRYPTED_PASSWORD_AES()
+    encrypted_password_pointer['Data'] = encrypted_password_struct
+
+    request = SamrUnicodeChangePasswordUser4()
+    request['ServerName'] = RPC_UNICODE_STRING(server_name_bytes)
+    request['UserName'] = RPC_UNICODE_STRING(user_name_bytes)
+    request['EncryptedPassword'] = encrypted_password_pointer
+    
+    return dce.request(request)
+            
 
 def hSamrLookupDomainInSamServer(dce, serverHandle, name):
     request = SamrLookupDomainInSamServer()

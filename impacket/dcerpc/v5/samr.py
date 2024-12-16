@@ -831,15 +831,9 @@ class SAMPR_ENCRYPTED_PASSWORD_AES(NDRSTRUCT):
         ('Cipher', PUCHAR_ARRAY),
         ('PBKDF2Iterations', ULONGLONG),
     )
-    
-class SAMPR_USER_PASSWORD_AES(NDRSTRUCT):
-    structure = (
-        ('Length', ULONG),
-        ('Buffer', '512s=b""'),
-    )
     def getAlignment(self):
-        return 4
-    
+        return 1
+        
 # Define the pointer type for SAMPR_ENCRYPTED_PASSWORD_AES
 class PSAMPR_ENCRYPTED_PASSWORD_AES(NDRPOINTER):
     referent = (
@@ -2317,10 +2311,12 @@ class SamrUnicodeChangePasswordUser2(NDRCALL):
 class SamrUnicodeChangePasswordUser4(NDRCALL):
     opnum = 73  # Assuming the opnum for SamrUnicodeChangePasswordUser4 is 73
     structure = (
-        ('ServerName', RPC_UNICODE_STRING),             # NETBIOS name of the server
-        ('UserName', RPC_UNICODE_STRING),                # Username for the account
+        ('ServerName', PRPC_UNICODE_STRING),             # NETBIOS name of the server
+        ('UserName', PRPC_UNICODE_STRING),                # Username for the account
         ('EncryptedPassword', PSAMPR_ENCRYPTED_PASSWORD_AES),  # Encrypted password structure
     )
+    def getAlignment(self):
+        return 1    
 
 class SamrUnicodeChangePasswordUser4Response(NDRCALL):
     structure = (
@@ -2955,9 +2951,9 @@ def _generate_password_buffer(password: str, size: int = 512):
 # Derive key using NT hash and PBKDF2
 def _generate_cek(current_password: str, salt: bytes, iterations: int) -> bytes:
     from impacket import ntlm
-    nt_hash = ntlm.compute_nthash(current_password)
+    nt_hash = ntlm.compute_nthash(current_password.encode("utf-16le"))
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-samr/c37085ec-c456-4a1c-ad98-a4c2b39a35fd
-    key = PBKDF2(nt_hash, salt, dkLen=16, count=iterations) 
+    key = PBKDF2(nt_hash, salt, dkLen=16, count=iterations, hmac_hash_module=SHA512) 
     return key
 
 
@@ -2994,8 +2990,6 @@ def _encrypt_password_aes(current_password, new_password, iterations=5000):
     return auth_data, salt, encrypted_password, iterations
     
 def hSamrUnicodeChangePasswordUser4(dce, server_name, user_name, current_password, new_password):
-    server_name_bytes = server_name.encode('utf-16le')
-    user_name_bytes = user_name.encode('utf-16le')
 
     auth_data, salt, encrypted_password, iterations = _encrypt_password_aes(current_password, new_password)
 
@@ -3022,8 +3016,8 @@ def hSamrUnicodeChangePasswordUser4(dce, server_name, user_name, current_passwor
     encrypted_password_pointer['Data'] = encrypted_password_struct
 
     request = SamrUnicodeChangePasswordUser4()
-    request['ServerName'] = RPC_UNICODE_STRING(server_name_bytes)
-    request['UserName'] = RPC_UNICODE_STRING(user_name_bytes)
+    request['ServerName'] = server_name
+    request['UserName'] = user_name
     request['EncryptedPassword'] = encrypted_password_pointer
     
     return dce.request(request)
